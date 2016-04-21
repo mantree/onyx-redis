@@ -63,33 +63,32 @@
   (let [redis-uri (get-in redis-spec [:spec :uri])
         test-key "test-key" ;;(str (java.util.UUID/randomUUID))
         batch-settings {:onyx/batch-size batch-size :onyx/batch-timeout batch-timeout}
-        base-job (merge {:workflow [[:in :write-state]
-                                    [:read-state :inc]
-                                    [:inc :write-state]
-                                    [:inc :close-state]
-                                    [:inc :out]
-                                    ]
-                         :catalog [{:onyx/name :inc
-                                    :onyx/fn   :onyx.plugin.redis-loop-job-test/my-inc
-                                    :onyx/type :function
-                                    :onyx/batch-size batch-size}
-                                   {:onyx/name :close-state
-                                    :onyx/plugin :onyx.peer.function/function
-                                    :onyx/fn :onyx.plugin.redis-loop-job-test/close-state
-                                    :onyx/type :output
-                                    :onyx/medium :function
-                                    :onyx/batch-size batch-size
-                                    :onyx/batch-timeout batch-timeout}]
-                         :lifecycles []
-                         :windows []
-                         :triggers []
-                         :flow-conditions [{:flow/from :inc
-                                              :flow/to [:write-state]
-                                              :flow/predicate [:not :onyx.plugin.redis-loop-job-test/enough?]}
-                                           {:flow/from :inc
-                                              :flow/to [:close-state :out]
-                                              :flow/predicate :onyx.plugin.redis-loop-job-test/enough?}]
-                         :task-scheduler :onyx.task-scheduler/balanced})]
+        base-job {:workflow [[:in :write-state]
+                             [:read-state :inc]
+                             [:inc :write-state]
+                             [:inc :close-state]
+                             [:inc :out]]
+                  :catalog [{:onyx/name :inc
+                             :onyx/fn   :onyx.plugin.redis-loop-job-test/my-inc
+                             :onyx/type :function
+                             :onyx/batch-size batch-size}
+                            {:onyx/name :close-state
+                             :onyx/plugin :onyx.peer.function/function
+                             :onyx/fn :onyx.plugin.redis-loop-job-test/close-state
+                             :onyx/type :output
+                             :onyx/medium :function
+                             :onyx/batch-size batch-size
+                             :onyx/batch-timeout batch-timeout}]
+                  :lifecycles []
+                  :windows []
+                  :triggers []
+                  :flow-conditions [{:flow/from :inc
+                                     :flow/to [:write-state]
+                                     :flow/predicate [:not :onyx.plugin.redis-loop-job-test/enough?]}
+                                    {:flow/from :inc
+                                     :flow/to [:close-state :out]
+                                     :flow/predicate :onyx.plugin.redis-loop-job-test/enough?}]
+                  :task-scheduler :onyx.task-scheduler/balanced}]
     (-> base-job
         (add-task (core-async/input :in batch-settings))
         (add-task (redis/writer :write-state redis-uri test-key batch-settings))
