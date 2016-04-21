@@ -49,7 +49,7 @@
 (def race-stats (atom []))
 
 (defn subscribe-race-stats []
-  (car/with-new-pubsub-listener (redis-conn)
+  (car/with-new-pubsub-listener (:spec (redis-conn))
     {"race-stats" #(swap! race-stats conj %)}
     (car/subscribe "race-stats")))
 

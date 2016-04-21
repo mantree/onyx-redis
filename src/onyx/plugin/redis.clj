@@ -8,10 +8,10 @@
             [onyx.types :as t]
             [taoensso.carmine :as car :refer [wcar]]))
 
-(defrecord Ops [sadd lpush zadd set lpop spop rpop pfcount pfadd publish])
+(defrecord Ops [sadd lpush zadd set lpop spop rpop pfcount pfadd publish get])
 
 (def operations
-  (->Ops car/sadd car/lpush car/zadd car/set car/lpop car/spop car/rpop car/pfcount car/pfadd car/publish))
+  (->Ops car/sadd car/lpush car/zadd car/set car/lpop car/spop car/rpop car/pfcount car/pfadd car/publish car/get))
 
 ;;;;;;;;;;;;;;;;;;;;
 ;; Connection lifecycle code
@@ -32,7 +32,6 @@
 
 ;;;;;;;;;;;;;;;;;;;;;
 ;; Output plugin code
-
 
 (defrecord RedisWriter [conn]
   p-ext/Pipeline
@@ -73,9 +72,8 @@
      :redis/drained?         (:drained? pipeline)
      :redis/pending-messages (:pending-messages pipeline)}))
 
-(defn all-done? [messages]
-  (empty? (remove #(= :done (:message %))
-                  messages)))
+(defn done? [message]
+  (= "done" (:message message)))
 
 (defn take-from-redis
   "conn: Carmine map for connecting to redis
@@ -87,14 +85,81 @@
   finish processing the batch it's currently on before returning. This means that
   if your batch sizes are large and steps are small, it is possible to block for
   and extended ammount of time. Returns nil if the list is exausted."
-  [conn k batch-size timeout]
-  (let [end (+ timeout (System/currentTimeMillis))]
-    (loop [return []]
-      (if (and (< (System/currentTimeMillis) end)
-               (< (count return) batch-size))
-        (let [vs (wcar conn
-                       (doall (map (fn [_]
-                                     (car/lpop k))
-                                   (range (- batch-size (count return))))))]
-              (recur (into return vs)))
-        return))))
+  [conn k]
+  (wcar conn (car/get k)))
+
+(defrecord RedisReader [conn k pending-state drained? current-state]
+  p-ext/Pipeline
+  p-ext/PipelineInput
+  (write-batch [this event]
+    (onyx.peer.function/write-batch event))
+
+  (read-batch [_ event]
+    (if @pending-state
+      (do
+        (if (done? @pending-state)
+          (reset! drained? true)
+          ;; Allow unset to reduce the chance of draining race conditions
+          ;; I believe these are still possible in this plugin thanks to the
+          ;; sentinel handling
+          (reset! drained? false))
+        {:onyx.core/batch [@pending-state]})
+      (let [raw-state (take-from-redis conn k)]
+        (when-not (= raw-state @current-state)
+          (prn "Swapping state: " raw-state @current-state)
+          (reset! current-state raw-state)
+          (let [state (t/input (random-uuid) 
+                               raw-state)]
+            (if (= "done" raw-state)
+              (do
+                (prn "Drained")
+                (reset! drained? true)
+                {:onyx.core/batch [:done]})
+              (do
+                ;; Allow unset to reduce the chance of draining race conditions
+                ;; I believe these are still possible in this plugin thanks to the
+                ;; sentinel handling
+                (reset! drained? false)
+                (reset! pending-state state)
+                {:onyx.core/batch [state]})))))))
+
+  (ack-segment
+      [_ _ _]
+      (reset! pending-state nil))
+
+  (retry-segment
+      [_ _ _]
+      (reset! pending-state nil))
+
+  (pending?
+      [_ _ _]
+      @pending-state)
+
+  (drained?
+      [_ event]
+      @drained?)
+
+  (seal-resource
+      [_ event]
+                                        ;destory key in redis
+      ))
+
+(defn reader [pipeline-data]
+  (let [catalog-entry (:onyx.core/task-map pipeline-data)     
+        pending-state (atom nil)
+        drained?      (atom false)
+        read-timeout  (or (:redis/read-timeout-ms catalog-entry) 4000)
+        k (:redis/key catalog-entry)
+        uri (:redis/uri catalog-entry)
+        _ (when-not uri
+            (throw (ex-info ":redis/uri must be supplied to output task." catalog-entry)))
+        op (or ((:redis/op catalog-entry) operations)
+               (throw (Exception. (str "redis/op not found."))))
+        conn             {:pool nil
+                          :spec {:uri uri
+                                 :read-timeout-ms read-timeout}}]
+    (->RedisReader conn k pending-state
+                   drained? (atom nil))))
+
+(def reader-state-calls
+  {:lifecycle/before-task-start inject-pending-state})

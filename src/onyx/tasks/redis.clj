@@ -29,10 +29,12 @@
   (s/->Both [os/TaskMap
              {:redis/uri s/Str
               :redis/key (s/either s/Str s/Keyword)
-              :redis/op (s/enum :lpop :rpop :spop)
+              :redis/op (s/enum :get)
               (s/optional-key :redis/read-timeout-ms) s/Num
               UserTaskMapKey s/Any}]))
 
+ (comment           :lifecycles [{:lifecycle/task task-name
+                                            :lifecycle/calls :onyx.plugin.redis/reader-state-calls}])
 (s/defn ^:always-validate reader
   ([task-name :- s/Keyword opts]
    {:task {:task-map (merge {:onyx/name task-name
@@ -41,14 +43,13 @@
                              :onyx/medium :redis
                              :onyx/max-peers 1}
                             opts)
-           :lifecycles [{:lifecycle/task task-name
-                         :lifecycle/calls :onyx.plugin.redis/reader-state-calls}]}
+          }
     :schema {:task-map RedisReaderTaskMap
              :lifecycles [os/Lifecycle]}})
   ([task-name :- s/Keyword
     uri :- s/Str
     k :- (s/either s/Str s/Keyword)
-    op :- (s/enum :lpop :rpop :spop)
+    op :- (s/enum :get)
     task-opts :- {s/Any s/Any}]
    (reader task-name (merge {:redis/uri uri
                              :redis/key k
