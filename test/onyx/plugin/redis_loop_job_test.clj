@@ -39,7 +39,8 @@
 (defn close-state
   [segment]
   (prn "Setting test-key to 'done'" segment)
-  (wcar (redis-conn) (car/set "test-key" "done"))
+  (wcar (redis-conn) 
+        (car/set "test-key" "done"))
   {})
 
 #_(defn write-state*
@@ -63,9 +64,8 @@
         test-key "test-key" ;;(str (java.util.UUID/randomUUID))
         batch-settings {:onyx/batch-size batch-size :onyx/batch-timeout batch-timeout}
         base-job (merge {:workflow [[:in :write-state]
-                                    [:write-state :read-state]
                                     [:read-state :inc]
-                                    ;;[:inc :write-state]
+                                    [:inc :write-state]
                                     [:inc :close-state]
                                     [:inc :out]
                                     ]
@@ -83,10 +83,10 @@
                          :lifecycles []
                          :windows []
                          :triggers []
-                         :flow-conditions [#_{:flow/from :inc
+                         :flow-conditions [{:flow/from :inc
                                               :flow/to [:write-state]
                                               :flow/predicate [:not :onyx.plugin.redis-loop-job-test/enough?]}
-                                           #_{:flow/from :inc
+                                           {:flow/from :inc
                                               :flow/to [:close-state :out]
                                               :flow/predicate :onyx.plugin.redis-loop-job-test/enough?}]
                          :task-scheduler :onyx.task-scheduler/balanced})]

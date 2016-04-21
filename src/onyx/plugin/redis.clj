@@ -85,47 +85,35 @@
   [conn k]
   (wcar conn (car/get k)))
 
-(defrecord RedisReader [conn k pending-state drained? current-state]
+(defrecord RedisReader [conn k drained? current-state]
   p-ext/Pipeline
   p-ext/PipelineInput
   (write-batch [this event]
     (onyx.peer.function/write-batch event))
 
   (read-batch [_ event]
-    (if @pending-state
-      (do
-        (if (done? @pending-state)
-          (reset! drained? true)
-          ;; Allow unset to reduce the chance of draining race conditions
-          ;; I believe these are still possible in this plugin thanks to the
-          ;; sentinel handling
-          (reset! drained? false))
-        {:onyx.core/batch [@pending-state]})
-      (let [raw-state (take-from-redis conn k)]
-        (when-not (= raw-state @current-state)
-          (prn "Swapping state: " raw-state @current-state)
-          (reset! current-state raw-state)
-          (let [state (t/input (random-uuid)
-                               raw-state)
-                is-done (= "done" raw-state)]
-            (reset! drained? is-done)
-            (if is-done
-              {:onyx.core/batch [(t/input (random-uuid) :done)]}
-              (do
-                (reset! pending-state state)
-                {:onyx.core/batch [state]})))))))
+    (let [raw-state (take-from-redis conn k)]
+      (when-not (= raw-state @current-state)
+        (prn "Swapping state: " raw-state @current-state)
+        (reset! current-state raw-state)
+        (let [state (t/input (random-uuid)
+                             raw-state)
+              is-done (= "done" raw-state)]
+          (reset! drained? is-done)
+          (if is-done
+            {:onyx.core/batch [(t/input (random-uuid) :done)]}
+            {:onyx.core/batch [state]})))))
 
   (ack-segment
-      [_ _ _]
-    (reset! pending-state nil))
+      [_ _ _])
 
   (retry-segment
       [_ _ _]
-    (reset! pending-state nil))
+    (reset! current-state nil))
 
   (pending?
       [_ _ _]
-    @pending-state)
+    false)
 
   (drained?
       [_ event]
@@ -138,7 +126,6 @@
 
 (defn reader [pipeline-data]
   (let [catalog-entry (:onyx.core/task-map pipeline-data)
-        pending-state (atom nil)
         drained?      (atom false)
         read-timeout  (or (:redis/read-timeout-ms catalog-entry) 4000)
         k (:redis/key catalog-entry)
@@ -148,7 +135,7 @@
         conn             {:pool nil
                           :spec {:uri uri
                                  :read-timeout-ms read-timeout}}]
-    (->RedisReader conn k pending-state
+    (->RedisReader conn k
                    drained? (atom nil))))
 
 (def reader-state-calls
