@@ -33,19 +33,15 @@
 ;;;;;;;;;;;;;;;;;;;;;
 ;; Output plugin code
 
-(defrecord RedisWriter [conn]
+(defrecord RedisWriter [conn k]
   p-ext/Pipeline
   (read-batch [_ event]
     (onyx.peer.function/read-batch event))
 
-  (write-batch [_ {:keys [onyx.core/results]}]
-    (wcar conn
-          (doall
-            (map (fn [{:keys [message]}]
-                   (let [op ((:op message) operations)]
-                     (assert (:args message) "Redis expected format was changed to expect: {:op :operation :args [arg1, arg2, arg3]}")
-                     (apply op (:args message))))
-                 (mapcat :leaves (:tree results)))))
+  (write-batch [_ {:keys [onyx.core/results] :as everything}]
+    (when-let [msg (:message (first (mapcat :leaves (:tree results))))]
+      (prn "Writing msg" msg)
+      (wcar conn (car/set k msg)))
     {})
   (seal-resource [_ _]
     {}))
@@ -53,12 +49,13 @@
 (defn writer [pipeline-data]
   (let [catalog-entry (:onyx.core/task-map pipeline-data)
         uri (:redis/uri catalog-entry)
+        k (:redis/key catalog-entry)
         _ (when-not uri
             (throw (ex-info ":redis/uri must be supplied to output task." catalog-entry)))
         conn          {:spec {:uri uri
                               :read-timeout-ms (or (:redis/read-timeout-ms catalog-entry)
                                                    4000)}}]
-    (->RedisWriter conn)))
+    (->RedisWriter conn k)))
 
 ;;;;;;;;;;;;;;;;;;;;;
 ;; Input plugin code
@@ -108,44 +105,39 @@
         (when-not (= raw-state @current-state)
           (prn "Swapping state: " raw-state @current-state)
           (reset! current-state raw-state)
-          (let [state (t/input (random-uuid) 
-                               raw-state)]
-            (if (= "done" raw-state)
+          (let [state (t/input (random-uuid)
+                               raw-state)
+                is-done (= "done" raw-state)]
+            (reset! drained? is-done)
+            (if is-done
+              {:onyx.core/batch [(t/input (random-uuid) :done)]}
               (do
-                (prn "Drained")
-                (reset! drained? true)
-                {:onyx.core/batch [:done]})
-              (do
-                ;; Allow unset to reduce the chance of draining race conditions
-                ;; I believe these are still possible in this plugin thanks to the
-                ;; sentinel handling
-                (reset! drained? false)
                 (reset! pending-state state)
                 {:onyx.core/batch [state]})))))))
 
   (ack-segment
       [_ _ _]
-      (reset! pending-state nil))
+    (reset! pending-state nil))
 
   (retry-segment
       [_ _ _]
-      (reset! pending-state nil))
+    (reset! pending-state nil))
 
   (pending?
       [_ _ _]
-      @pending-state)
+    @pending-state)
 
   (drained?
       [_ event]
-      @drained?)
+    @drained?)
 
   (seal-resource
       [_ event]
                                         ;destory key in redis
-      ))
+    ))
 
 (defn reader [pipeline-data]
-  (let [catalog-entry (:onyx.core/task-map pipeline-data)     
+  (let [catalog-entry (:onyx.core/task-map pipeline-data)
         pending-state (atom nil)
         drained?      (atom false)
         read-timeout  (or (:redis/read-timeout-ms catalog-entry) 4000)
@@ -153,8 +145,6 @@
         uri (:redis/uri catalog-entry)
         _ (when-not uri
             (throw (ex-info ":redis/uri must be supplied to output task." catalog-entry)))
-        op (or ((:redis/op catalog-entry) operations)
-               (throw (Exception. (str "redis/op not found."))))
         conn             {:pool nil
                           :spec {:uri uri
                                  :read-timeout-ms read-timeout}}]

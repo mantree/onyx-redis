@@ -29,7 +29,6 @@
   (s/->Both [os/TaskMap
              {:redis/uri s/Str
               :redis/key (s/either s/Str s/Keyword)
-              :redis/op (s/enum :get)
               (s/optional-key :redis/read-timeout-ms) s/Num
               UserTaskMapKey s/Any}]))
 
@@ -43,21 +42,20 @@
                              :onyx/medium :redis
                              :onyx/max-peers 1}
                             opts)
-          }
+           }
     :schema {:task-map RedisReaderTaskMap
              :lifecycles [os/Lifecycle]}})
   ([task-name :- s/Keyword
     uri :- s/Str
     k :- (s/either s/Str s/Keyword)
-    op :- (s/enum :get)
     task-opts :- {s/Any s/Any}]
    (reader task-name (merge {:redis/uri uri
-                             :redis/key k
-                             :redis/op op} task-opts))))
+                             :redis/key k} task-opts))))
 
 (def RedisWriterTaskMap
   (s/->Both [os/TaskMap
              {:redis/uri s/Str
+              :redis/key (s/either s/Str s/Keyword)
               (s/optional-key :redis/read-timeout-ms) s/Num
               UserTaskMapKey s/Any}]))
 
@@ -71,6 +69,8 @@
     :schema {:task-map RedisWriterTaskMap}})
   ([task-name :- s/Keyword
     uri :- s/Str
+    k :- (s/either s/Str s/Keyword)
     task-opts :- {s/Any s/Any}]
-   (writer task-name (merge {:redis/uri uri}
+   (writer task-name (merge {:redis/uri uri
+                             :redis/key k}
                             task-opts))))

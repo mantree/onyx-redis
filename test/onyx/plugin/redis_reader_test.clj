@@ -15,6 +15,7 @@
             [taoensso.carmine :as car :refer [wcar]]))
 
 
+
 (def config (atom {}))
 
 (defn redis-conn []
@@ -49,7 +50,7 @@
                          :flow-conditions []
                          :task-scheduler :onyx.task-scheduler/balanced})]
     (-> base-job
-        (add-task (redis/reader :in redis-uri test-key :get batch-settings))
+        (add-task (redis/reader :in redis-uri test-key batch-settings))
         (add-task (core-async/output :out batch-settings)))))
 
 (defn put-state
