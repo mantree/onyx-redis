@@ -38,11 +38,11 @@
 
 (defn close-redis-loop
   [event {:keys [redis/key]}]
-  (let [sentinel "done"
-        r (wcar (redis-conn) (car/get key))]
-    (when-not (= sentinel r)
-      (wcar (redis-conn)
-            (car/set key sentinel))))
+  (let [sentinel "done"]
+    (when (and
+           (= (wcar (redis-conn) (car/exists key)) 1)
+           (not= (wcar (redis-conn) (car/get key)) sentinel))
+      (wcar (redis-conn) (car/set key sentinel))))
   {})
 
 (def loop-done-calls
