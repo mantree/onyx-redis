@@ -36,24 +36,17 @@
   [segment]
   (update segment :number inc))
 
-(defn close-state
-  [segment]
-  (prn "Setting test-key to 'done'" segment)
-  (wcar (redis-conn) 
-        (car/set "test-key" "done"))
+(defn close-redis-loop
+  [event {:keys [redis/key]}]
+  (let [sentinel "done"
+        r (wcar (redis-conn) (car/get key))]
+    (when-not (= sentinel r)
+      (wcar (redis-conn)
+            (car/set key sentinel))))
   {})
 
-#_(defn write-state*
-    [segment]
-    (prn "Writing test-key to" segment)
-    (wcar (redis-conn) (car/set "test-key" segment))
-    {})
-
-#_(defn read-state*
-    [segment]
-    (let [res (wcar (redis-conn) (car/get "test-key"))]
-      (prn "Reading" res "from redis")
-      res))
+(def loop-done-calls
+  {:lifecycle/after-batch close-redis-loop})
 
 (defn enough?
   [_ _ {:keys [number]} _]
@@ -61,32 +54,25 @@
 
 (defn build-job [redis-spec batch-size batch-timeout]
   (let [redis-uri (get-in redis-spec [:spec :uri])
-        test-key "test-key" ;;(str (java.util.UUID/randomUUID))
+        test-key (str (java.util.UUID/randomUUID))
         batch-settings {:onyx/batch-size batch-size :onyx/batch-timeout batch-timeout}
         base-job {:workflow [[:in :write-state]
                              [:read-state :inc]
                              [:inc :write-state]
-                             [:inc :close-state]
                              [:inc :out]]
                   :catalog [{:onyx/name :inc
                              :onyx/fn   :onyx.plugin.redis-loop-job-test/my-inc
                              :onyx/type :function
-                             :onyx/batch-size batch-size}
-                            {:onyx/name :close-state
-                             :onyx/plugin :onyx.peer.function/function
-                             :onyx/fn :onyx.plugin.redis-loop-job-test/close-state
-                             :onyx/type :output
-                             :onyx/medium :function
-                             :onyx/batch-size batch-size
-                             :onyx/batch-timeout batch-timeout}]
-                  :lifecycles []
-                  :windows []
-                  :triggers []
+                             :onyx/batch-size batch-size}]
+                  :lifecycles [{:lifecycle/task :out
+                                :lifecycle/calls :onyx.plugin.redis-loop-job-test/loop-done-calls
+                                :redis/key test-key
+                                :lifecycle/doc "Once we exit the loop, tell indicate we're done by posting sentinel to Redis"}]
                   :flow-conditions [{:flow/from :inc
                                      :flow/to [:write-state]
                                      :flow/predicate [:not :onyx.plugin.redis-loop-job-test/enough?]}
                                     {:flow/from :inc
-                                     :flow/to [:close-state :out]
+                                     :flow/to [:out]
                                      :flow/predicate :onyx.plugin.redis-loop-job-test/enough?}]
                   :task-scheduler :onyx.task-scheduler/balanced}]
     (-> base-job

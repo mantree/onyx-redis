@@ -8,10 +8,13 @@
             [onyx.types :as t]
             [taoensso.carmine :as car :refer [wcar]]))
 
-(defrecord Ops [sadd lpush zadd set lpop spop rpop pfcount pfadd publish get])
+(defn redis-get
+  [conn k]
+  (wcar conn (car/get k)))
 
-(def operations
-  (->Ops car/sadd car/lpush car/zadd car/set car/lpop car/spop car/rpop car/pfcount car/pfadd car/publish car/get))
+(defn redis-set!
+  [conn k v]
+  (wcar conn (car/set k v)))
 
 ;;;;;;;;;;;;;;;;;;;;
 ;; Connection lifecycle code
@@ -19,7 +22,7 @@
 (defn inject-conn-spec [{:keys [onyx.core/params onyx.core/task-map] :as event}
                         {:keys [redis/param? redis/uri redis/read-timeout-ms] :as lifecycle}]
   (when-not (or uri (:redis/uri task-map))
-      (throw (ex-info ":redis/uri must be supplied to output task." lifecycle)))
+    (throw (ex-info ":redis/uri must be supplied to output task." lifecycle)))
   (let [conn {:spec {:uri (or (:redis/uri task-map) uri)
                      :read-timeout-ms (or read-timeout-ms 4000)}}]
     {:onyx.core/params (if (or (:redis/param? task-map) param?)
@@ -39,11 +42,12 @@
     (onyx.peer.function/read-batch event))
 
   (write-batch [_ {:keys [onyx.core/results] :as everything}]
-    (when-let [msg (:message (first (mapcat :leaves (:tree results))))]
-      (prn "Writing msg" msg)
-      (wcar conn (car/set k msg)))
+    (when-let [segment (first (mapcat :leaves (:tree results)))]
+      (let [package (select-keys segment [:id :message])]
+        (redis-set! conn k package)))
     {})
   (seal-resource [_ _]
+
     {}))
 
 (defn writer [pipeline-data]
@@ -69,51 +73,39 @@
      :redis/drained?         (:drained? pipeline)
      :redis/pending-messages (:pending-messages pipeline)}))
 
-(defn done? [message]
-  (= "done" (:message message)))
-
-(defn take-from-redis
-  "conn: Carmine map for connecting to redis
-  key: The name of a redis key for looking up the relevant values
-  batch-size: The maximum size of a returned batch
-  timeout: stop processing new collections after `timeout`/ms''
-
-  In order to stay consistent in Redis list consumption, this function will
-  finish processing the batch it's currently on before returning. This means that
-  if your batch sizes are large and steps are small, it is possible to block for
-  and extended ammount of time. Returns nil if the list is exausted."
-  [conn k]
-  (wcar conn (car/get k)))
-
-(defrecord RedisReader [conn k drained? current-state]
+(defrecord RedisReader [conn k unacked-messages drained? current-state]
   p-ext/Pipeline
   p-ext/PipelineInput
   (write-batch [this event]
     (onyx.peer.function/write-batch event))
 
   (read-batch [_ event]
-    (let [raw-state (take-from-redis conn k)]
+    (let [{:keys [message id]
+           :or {id (random-uuid)}
+           :as raw-state} (redis-get conn k)]
       (when-not (= raw-state @current-state)
-        (prn "Swapping state: " raw-state @current-state)
         (reset! current-state raw-state)
-        (let [state (t/input (random-uuid)
-                             raw-state)
-              is-done (= "done" raw-state)]
-          (reset! drained? is-done)
-          (if is-done
-            {:onyx.core/batch [(t/input (random-uuid) :done)]}
-            {:onyx.core/batch [state]})))))
+        (let [done? (= "done" raw-state)
+              ret   {:onyx.core/batch [(t/input id (if done? :done message))]}]
+          (reset! drained? done?)
+          (when-not done?
+            (swap! unacked-messages assoc id raw-state))
+          ret))))
 
   (ack-segment
-      [_ _ _])
+      [_ _ message-id]
+    (swap! unacked-messages dissoc message-id))
 
   (retry-segment
-      [_ _ _]
+      [_ _ message-id]
+    (when-let [m (get @unacked-messages message-id)]
+      (swap! unacked-messages dissoc message-id)
+      (redis-set! conn k m))
     (reset! current-state nil))
 
   (pending?
-      [_ _ _]
-    false)
+      [_ _ message-id]
+    (contains? @unacked-messages message-id))
 
   (drained?
       [_ event]
@@ -121,8 +113,7 @@
 
   (seal-resource
       [_ event]
-                                        ;destory key in redis
-    ))
+    {}))
 
 (defn reader [pipeline-data]
   (let [catalog-entry (:onyx.core/task-map pipeline-data)
@@ -130,12 +121,14 @@
         read-timeout  (or (:redis/read-timeout-ms catalog-entry) 4000)
         k (:redis/key catalog-entry)
         uri (:redis/uri catalog-entry)
+        unacked-messages (atom {})
         _ (when-not uri
             (throw (ex-info ":redis/uri must be supplied to output task." catalog-entry)))
         conn             {:pool nil
                           :spec {:uri uri
                                  :read-timeout-ms read-timeout}}]
     (->RedisReader conn k
+                   unacked-messages
                    drained? (atom nil))))
 
 (def reader-state-calls
