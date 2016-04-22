@@ -16,6 +16,10 @@
   [conn k v]
   (wcar conn (car/set k v)))
 
+(defn redis-del!
+  [conn k]
+  (wcar conn (car/del k)))
+
 ;;;;;;;;;;;;;;;;;;;;
 ;; Connection lifecycle code
 
@@ -47,7 +51,6 @@
         (redis-set! conn k package)))
     {})
   (seal-resource [_ _]
-
     {}))
 
 (defn writer [pipeline-data]
@@ -80,17 +83,19 @@
     (onyx.peer.function/write-batch event))
 
   (read-batch [_ event]
-    (let [{:keys [message id]
-           :or {id (random-uuid)}
-           :as raw-state} (redis-get conn k)]
-      (when-not (= raw-state @current-state)
-        (reset! current-state raw-state)
-        (let [done? (= "done" raw-state)
-              ret   {:onyx.core/batch [(t/input id (if done? :done message))]}]
-          (reset! drained? done?)
-          (when-not done?
-            (swap! unacked-messages assoc id raw-state))
-          ret))))
+    (when-not @drained?
+      (let [{:keys [message id]
+             :or {id (random-uuid)}
+             :as raw-state} (redis-get conn k)]
+        (when-not (= raw-state @current-state)
+          (reset! current-state raw-state)
+          (let [done? (= "done" raw-state)
+                ret   {:onyx.core/batch [(t/input id (if done? :done message))]}]
+            (reset! drained? done?)
+            (if done?
+              (redis-del! conn k)
+              (swap! unacked-messages assoc id raw-state))
+            ret)))))
 
   (ack-segment
       [_ _ message-id]
@@ -100,8 +105,9 @@
       [_ _ message-id]
     (when-let [m (get @unacked-messages message-id)]
       (swap! unacked-messages dissoc message-id)
-      (redis-set! conn k m))
-    (reset! current-state nil))
+      (redis-set! conn k m)
+      (reset! current-state nil)
+      (reset! drained? false)))
 
   (pending?
       [_ _ message-id]

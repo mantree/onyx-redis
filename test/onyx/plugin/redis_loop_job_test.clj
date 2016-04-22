@@ -93,10 +93,7 @@
       (onyx.test-helper/validate-enough-peers! test-env job)
       (let [job-id (:job-id (onyx.api/submit-job peer-config job))
             got (<!! out)]
-        (prn "GOT: " got)
-        (testing "redis :sadd and :smembers are correctly distributed"
+        (testing "Number has incremented in a loop until `enough?`'"
           (is (= got
                  {:test "blah" :number 10})))
-        (prn "Waiting for job to complete...")
-        (onyx.api/await-job-completion peer-config job-id)
-        (prn "Test completed.")))))
+        (onyx.api/await-job-completion peer-config job-id)))))
