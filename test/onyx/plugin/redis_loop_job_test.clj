@@ -34,12 +34,10 @@
 
 (defn my-inc
   [segment]
-  (println "INC" (:number segment))
   (update segment :number inc))
 
 (defn my-dbl
   [segment]
-  (println "DBL" (:number segment))
   (update segment :number #(* 2 %)))
 
 (defn close-redis-loop
@@ -49,7 +47,6 @@
       (when (and
              (= (wcar (redis-conn) (car/exists key)) 1)
              (not= (wcar (redis-conn) (car/get key)) sentinel))
-        (println "Adding 'done' to redis")
         (wcar (redis-conn) (car/set key sentinel)))))
   {})
 
@@ -60,9 +57,14 @@
   [_ _ {:keys [number]} _]
   (> number 9))
 
-(defn build-job [redis-spec batch-size batch-timeout]
-  (let [redis-uri (get-in redis-spec [:spec :uri])
+(deftest redis-loop-test
+  (let [{:keys [env-config
+                peer-config]} @config
+        redis-spec (redis-conn)
+        redis-uri (get-in redis-spec [:spec :uri])
         test-key (str (java.util.UUID/randomUUID))
+        batch-size 1
+        batch-timeout 1000
         batch-settings {:onyx/batch-size batch-size :onyx/batch-timeout batch-timeout}
         base-job {:workflow [[:in :write-state]
                              [:read-state :inc]
@@ -89,18 +91,12 @@
                                     {:flow/from :inc
                                      :flow/to [:dbl]
                                      :flow/predicate :onyx.plugin.redis-loop-job-test/enough?}]
-                  :task-scheduler :onyx.task-scheduler/balanced}]
-    (-> base-job
-        (add-task (core-async/input :in batch-settings))
-        (add-task (redis/writer :write-state redis-uri test-key batch-settings))
-        (add-task (redis/reader :read-state redis-uri test-key batch-settings))
-        (add-task (core-async/output :out batch-settings)))))
-
-(deftest redis-loop-test
-  (let [{:keys [env-config
-                peer-config]} @config
-        redis-spec (redis-conn)
-        job (build-job redis-spec 1 1000)
+                  :task-scheduler :onyx.task-scheduler/balanced}
+        job (-> base-job
+                (add-task (core-async/input :in batch-settings))
+                (add-task (redis/writer :write-state redis-uri test-key batch-settings))
+                (add-task (redis/reader :read-state redis-uri test-key batch-settings))
+                (add-task (core-async/output :out batch-settings)))
         {:keys [out in]} (get-core-async-channels job)
         test-state {:test "blah" :number 0}]
     (with-test-env [test-env [6 env-config peer-config]]
