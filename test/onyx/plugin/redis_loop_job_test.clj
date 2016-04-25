@@ -34,15 +34,23 @@
 
 (defn my-inc
   [segment]
+  (println "INC" (:number segment))
   (update segment :number inc))
 
+(defn my-dbl
+  [segment]
+  (println "DBL" (:number segment))
+  (update segment :number #(* 2 %)))
+
 (defn close-redis-loop
-  [event {:keys [redis/key]}]
-  (let [sentinel "done"]
-    (when (and
-           (= (wcar (redis-conn) (car/exists key)) 1)
-           (not= (wcar (redis-conn) (car/get key)) sentinel))
-      (wcar (redis-conn) (car/set key sentinel))))
+  [{:keys [onyx.core/batch]} {:keys [redis/key]}]
+  (when-not (empty? batch)
+    (let [sentinel "done"]
+      (when (and
+             (= (wcar (redis-conn) (car/exists key)) 1)
+             (not= (wcar (redis-conn) (car/get key)) sentinel))
+        (println "Adding 'done' to redis")
+        (wcar (redis-conn) (car/set key sentinel)))))
   {})
 
 (def loop-done-calls
@@ -59,12 +67,19 @@
         base-job {:workflow [[:in :write-state]
                              [:read-state :inc]
                              [:inc :write-state]
-                             [:inc :out]]
+                             [:inc :dbl]
+                             [:dbl :out]]
                   :catalog [{:onyx/name :inc
                              :onyx/fn   :onyx.plugin.redis-loop-job-test/my-inc
                              :onyx/type :function
-                             :onyx/batch-size batch-size}]
-                  :lifecycles [{:lifecycle/task :out
+                             :onyx/batch-size batch-size
+                             :onyx/batch-timeout batch-timeout}
+                            {:onyx/name :dbl
+                             :onyx/fn   :onyx.plugin.redis-loop-job-test/my-dbl
+                             :onyx/type :function
+                             :onyx/batch-size batch-size
+                             :onyx/batch-timeout batch-timeout}]
+                  :lifecycles [{:lifecycle/task :dbl
                                 :lifecycle/calls :onyx.plugin.redis-loop-job-test/loop-done-calls
                                 :redis/key test-key
                                 :lifecycle/doc "Once we exit the loop, tell indicate we're done by posting sentinel to Redis"}]
@@ -72,7 +87,7 @@
                                      :flow/to [:write-state]
                                      :flow/predicate [:not :onyx.plugin.redis-loop-job-test/enough?]}
                                     {:flow/from :inc
-                                     :flow/to [:out]
+                                     :flow/to [:dbl]
                                      :flow/predicate :onyx.plugin.redis-loop-job-test/enough?}]
                   :task-scheduler :onyx.task-scheduler/balanced}]
     (-> base-job
@@ -95,5 +110,5 @@
             got (<!! out)]
         (testing "Number has incremented in a loop until `enough?`'"
           (is (= got
-                 {:test "blah" :number 10})))
+                 {:test "blah" :number 20})))
         (onyx.api/await-job-completion peer-config job-id)))))
